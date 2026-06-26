@@ -30,7 +30,7 @@ public final class QueryClient: @unchecked Sendable, ObservableObject {
 }
 
 extension QueryClient {
-    static let shared = QueryClient()
+    public static let shared = QueryClient()
 }
 
 public struct QueryClientKey: EnvironmentKey {
