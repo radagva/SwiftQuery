@@ -1,6 +1,6 @@
 # SwiftQuery
 
-A tiny, SwiftUI‑native data fetching and caching library inspired by [TanStack Query](https://tanstack.com/query). SwiftQuery gives you two property wrappers — `@Query` and `@Mutation` — backed by a shared in‑memory cache (`QueryClient`) so your views describe **what** they need, not **how** to fetch or store it.
+A tiny, SwiftUI‑native data fetching and caching library inspired by [TanStack Query](https://tanstack.com/query). SwiftQuery gives you three property wrappers — `@Query`, `@Mutation` and `@InfiniteQuery` — backed by a shared in‑memory cache (`QueryClient`) so your views describe **what** they need, not **how** to fetch or store it.
 
 It is intentionally minimal: no Combine pipelines to wire up, no global singletons to subclass, no network layer of its own. Pair it with whatever HTTP stack you already use — `URLSession`, [Alamofire](https://github.com/Alamofire/Alamofire), or [NetworkAgent](https://github.com/radagva/NetworkAgent).
 
@@ -10,6 +10,7 @@ It is intentionally minimal: no Combine pipelines to wire up, no global singleto
 
 - `@Query` property wrapper for read operations with automatic caching and `stale / fetching / success / error` state.
 - `@Mutation` property wrapper for write operations with optimistic updates and cache invalidation.
+- `@InfiniteQuery` property wrapper for paginated reads with `fetchNextPage()` and `hasNextPage` — perfect for infinite scrolls and "load more" buttons.
 - Shared `QueryClient` exposed through the SwiftUI environment.
 - Strongly typed cache keys derived from the query type **and** its variables.
 - Async/await first — no Combine required.
@@ -128,6 +129,51 @@ public enum MutationState<Value> {
     case success(Value)
 }
 ```
+
+### `InfiniteQueryFunc`
+
+The protocol for paginated reads. You provide an `initialPageParam`, a `run` that takes both your `Variables` and the current `pageParam`, and a `nextPageParam` that derives the next page's parameter from the previous response:
+
+```swift
+public protocol InfiniteQueryFunc {
+    associatedtype Value
+    associatedtype PageParam: Hashable
+    associatedtype Variables: Hashable = QueryVoid
+
+    var initialPageParam: PageParam { get }
+
+    func run(variables: Variables, pageParam: PageParam) async throws -> Value
+    func nextPageParam(
+        lastPage: Value,
+        allPages: [Value],
+        lastPageParam: PageParam,
+        allPageParams: [PageParam]
+    ) -> PageParam?
+}
+```
+
+Return `nil` from `nextPageParam` to signal "no more pages".
+
+### `@InfiniteQuery`
+
+A property wrapper holding an `InfiniteQueryState<Value, PageParam>` plus `.fetch(...)`, `.fetchNextPage(...)`, and `hasNextPage`:
+
+```swift
+public enum InfiniteQueryState<Value, PageParam: Hashable> {
+    case stale
+    case fetching
+    case fetchingNextPage(InfiniteQueryData<Value, PageParam>)
+    case error(Error)
+    case success(InfiniteQueryData<Value, PageParam>)
+}
+
+public struct InfiniteQueryData<Value, PageParam: Hashable> {
+    public let pages: [Value]
+    public let pageParams: [PageParam]
+}
+```
+
+`fetchingNextPage` carries the current data so views can keep rendering existing pages while the next one loads.
 
 ---
 
@@ -279,6 +325,124 @@ struct LogOut: MutationFunc {
 // ...
 await $logout.mutate()
 ```
+
+---
+
+## Infinite Queries in Depth
+
+`@InfiniteQuery` powers paginated lists, infinite scrolls, and "load more" buttons. Each call to `fetchNextPage` appends a page to the cached `InfiniteQueryData`; the cache key is derived from the `InfiniteQueryFunc` type **and** its `Variables` — exactly like `@Query`.
+
+### Basic infinite query
+
+```swift
+import SwiftUI
+import SwiftQuery
+
+struct Todo: Codable, Hashable, Identifiable {
+    let id: Int
+    let title: String
+}
+
+struct FetchTodos: InfiniteQueryFunc {
+    let initialPageParam = 1
+
+    func run(variables: QueryVoid, pageParam: Int) async throws -> [Todo] {
+        var components = URLComponents(string: "https://api.example.com/todos")!
+        components.queryItems = [.init(name: "page", value: "\(pageParam)")]
+        let (data, _) = try await URLSession.shared.data(from: components.url!)
+        return try JSONDecoder().decode([Todo].self, from: data)
+    }
+
+    func nextPageParam(
+        lastPage: [Todo],
+        allPages: [[Todo]],
+        lastPageParam: Int,
+        allPageParams: [Int]
+    ) -> Int? {
+        // Return nil once the API returns an empty page.
+        lastPage.isEmpty ? nil : lastPageParam + 1
+    }
+}
+
+struct TodosScreen: View {
+    @InfiniteQuery(FetchTodos()) private var todos
+
+    var body: some View {
+        List {
+            switch todos {
+            case .stale, .fetching:
+                ProgressView()
+
+            case .success(let data), .fetchingNextPage(let data):
+                ForEach(data.pages.flatMap { $0 }) { todo in
+                    Text(todo.title)
+                }
+                if $todos.hasNextPage {
+                    Button("Load more") {
+                        Task { await $todos.fetchNextPage() }
+                    }
+                }
+
+            case .error(let error):
+                Text(error.localizedDescription).foregroundStyle(.red)
+            }
+        }
+        .task { await $todos.fetch() }
+    }
+}
+```
+
+### State machine
+
+| State | Carries data? | Meaning |
+| --- | --- | --- |
+| `.stale` | – | Never fetched |
+| `.fetching` | – | Loading the first page |
+| `.fetchingNextPage(data)` | yes | Already have pages; fetching another |
+| `.success(data)` | yes | All currently loaded pages |
+| `.error(error)` | – | A page request failed |
+
+The `data` value carried by `.fetchingNextPage` is the most recent successful set of pages, so you can keep rendering existing rows while the next page loads.
+
+### Variables and per‑query caching
+
+If your paginated endpoint depends on filters (e.g. a search term), express them through `Variables`. Each combination gets its own cache slot:
+
+```swift
+struct SearchTodos: InfiniteQueryFunc {
+    let initialPageParam = 1
+
+    func run(variables: String, pageParam: Int) async throws -> [Todo] { /* ... */ }
+
+    func nextPageParam(
+        lastPage: [Todo],
+        allPages: [[Todo]],
+        lastPageParam: Int,
+        allPageParams: [Int]
+    ) -> Int? {
+        lastPage.isEmpty ? nil : lastPageParam + 1
+    }
+}
+
+@InfiniteQuery(SearchTodos()) private var results
+
+.task(id: query) { await $results.fetch(query) }
+```
+
+### Invalidating cached pages
+
+When a mutation should drop the cached pages of an infinite query, pass an `InfiniteQueryCacheKey` through `invalidating:`:
+
+```swift
+let todosKey = InfiniteQueryCacheKey<FetchTodos>(variables: .value)
+
+await $create.mutate(
+    with: input,
+    invalidating: [todosKey]
+)
+```
+
+The next `fetch` will start over from `initialPageParam`.
 
 ---
 
@@ -493,14 +657,15 @@ struct TodosScreen: View {
 
 ## Cache Keys
 
-When you need to invalidate something explicitly, build a key with `QueryCacheKey`:
+When you need to invalidate something explicitly, build a key with `QueryCacheKey` (or `InfiniteQueryCacheKey` for `@InfiniteQuery`):
 
 ```swift
 QueryCacheKey<FetchTodos>(variables: .value)
 QueryCacheKey<FetchUser>(variables: 42)
+InfiniteQueryCacheKey<FetchTodos>(variables: .value)
 ```
 
-The key hashes both the query type and the variables, so two different queries that happen to take the same variables never collide.
+Each key hashes both the function type and the variables, so two different queries that happen to take the same variables never collide — and the `Query` and `InfiniteQuery` namespaces are kept separate too.
 
 ---
 
