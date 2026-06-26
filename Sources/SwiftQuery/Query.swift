@@ -29,9 +29,9 @@ public struct Query<F: QueryFunc>: DynamicProperty where F.Variables: Hashable {
     public var wrappedValue: QueryState<F.Value> { state }
     public var projectedValue: Query<F> { self }
 
-    init(_ fn: F) { self.fn = fn }
+    public init(_ fn: F) { self.fn = fn }
 
-    func fetch(_ variables: F.Variables) async {
+    public func fetch(_ variables: F.Variables) async {
         let key = QueryCacheKey<F>(variables: variables)
 
         if let cached: F.Value = client.get(key) {
@@ -40,6 +40,7 @@ public struct Query<F: QueryFunc>: DynamicProperty where F.Variables: Hashable {
         }
 
         state = .fetching
+        
         do {
             let value = try await fn.run(variables)
             client.set(value, for: key)
@@ -51,5 +52,5 @@ public struct Query<F: QueryFunc>: DynamicProperty where F.Variables: Hashable {
 }
 
 public struct QueryVoid: Hashable, Sendable {
-    static let value = QueryVoid()
+    public static let value = QueryVoid()
 }

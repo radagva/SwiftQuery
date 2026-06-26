@@ -31,7 +31,7 @@ public struct Mutation<T: MutationFunc>: DynamicProperty {
     public var wrappedValue: MutationState<T.Value> { state }
     public var projectedValue: Mutation<T> { self }
 
-    init(_ fn: T) {
+    public init(_ fn: T) {
         self.fn = fn
     }
 
@@ -39,7 +39,7 @@ public struct Mutation<T: MutationFunc>: DynamicProperty {
     ///   - optimistic: Receives the client so you can speculatively update the cache.
     ///                 Return a rollback closure; it's called automatically on error.
     ///   - invalidating: Cache keys to drop after a successful mutation.
-    func mutate(
+    public func mutate(
         with variables: T.Variables,
         optimistic: ((QueryClient) -> () -> Void)? = nil,
         invalidating keys: [AnyHashable] = []
